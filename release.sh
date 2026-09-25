@@ -14,7 +14,7 @@ case "${1:-}" in
     ;;
 esac
 
-pnpm run release:dsh "$1"
+# pnpm run release:dsh "$1"
 
 VERSION=$(node -p "JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version")
 TAG="dsh-v${VERSION}"
