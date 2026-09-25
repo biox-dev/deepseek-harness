@@ -1,29 +1,27 @@
 #!/bin/bash
-# Publish a dsh release: bump every manifest, commit, tag, and push the tag.
-#
-# The tag is dsh-v<version> and must match the version the manifests carry,
-# because release:verify enforces that pairing and the tag push starts
-# release-cli-archive.yml.
+# 发布 dsh 版本：按最后一个 tag 递增版本号，打附注 tag 并推送。
+# 推送 tag 会触发 .github/workflows/release-cli-archive.yml 打包并上传 zip。
 set -euo pipefail
 
-case "${1:-}" in
-  major | minor | patch | [0-9]*.[0-9]*.[0-9]*) ;;
-  *)
-    echo "Usage: ./release.sh <major|minor|patch|x.y.z>" >&2
-    exit 1
-    ;;
+# 获取最新标签，如果没有则设为 dsh-v0.0.0
+LAST_TAG=$(git describe --tags --abbrev=0 --match 'dsh-v*' 2>/dev/null || echo "dsh-v0.0.0")
+# 去掉前缀和预发布后缀（如 -rc.1），只按 x.y.z 递增
+BASE="${LAST_TAG#dsh-v}"
+BASE="${BASE%%-*}"
+IFS='.' read -r MAJOR MINOR PATCH <<< "${BASE}"
+
+# 根据参数自动递增版本号
+case ${1:-} in
+  major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+  minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+  patch) PATCH=$((PATCH + 1)) ;;
+  *) echo "Usage: ./release.sh [major|minor|patch]"; exit 1 ;;
 esac
 
-# pnpm run release:dsh "$1"
+NEW_TAG="dsh-v${MAJOR}.${MINOR}.${PATCH}"
 
-VERSION=$(node -p "JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version")
-TAG="dsh-v${VERSION}"
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
+# 创建附注标签并推送
+git tag -a "${NEW_TAG}" -m "Release ${NEW_TAG}"
+git push origin "${NEW_TAG}"
 
-git add -u
-git commit -m "release(dsh): ${VERSION}"
-git tag -a "${TAG}" -m "Release ${TAG}"
-git push origin "${BRANCH}"
-git push origin "${TAG}"
-
-echo "Released ${TAG} from ${BRANCH}"
+echo "🎉 成功发布新版本: ${NEW_TAG}"

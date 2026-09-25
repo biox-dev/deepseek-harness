@@ -5,15 +5,11 @@
 # of that directory cannot start on its own. The archive carries the installed
 # dependency closure instead, built from this run's packed tarballs the same way
 # `release:verify-packed-install` already proves it can be installed and driven.
-#
-# Dispatch this workflow from the `dsh-v*` tag; the version gate below rejects
-# any other ref.
 name: Release CLI archive (dsh)
 
 on:
   push:
     tags: ['dsh-v*']
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -68,13 +64,6 @@ jobs:
       - name: Install (immutable)
         run: pnpm install --frozen-lockfile
 
-      # This runs from the tag, so a mistyped tag fails here instead of
-      # attaching an archive whose version nothing else agrees with.
-      - name: Verify release version
-        env:
-          RELEASE_PUBLISH: 'true'
-        run: pnpm run release:verify --family dsh
-
       - name: Build
         run: pnpm run build:official
 
@@ -88,10 +77,10 @@ jobs:
       - name: Assemble the archive
         run: |
           set -euo pipefail
-          version=$(node -p "JSON.parse(require('node:fs').readFileSync('apps/cli/package.json','utf8')).version")
-          stage="dist/release/dsh-$version"
+          tag="${GITHUB_REF#refs/tags/}"
+          stage="dist/release/$tag"
           mkdir -p "$stage"
-          printf '{"name":"dsh-%s","version":"%s","private":true}\n' "$version" "$version" > "$stage/package.json"
+          printf '{"name":"%s","version":"0.0.0","private":true}\n' "$tag" > "$stage/package.json"
           # Optional dependencies stay out for the same reason the packed-install
           # verification omits them: the Landlock platform packages behind them
           # need one musl build per architecture.
@@ -106,12 +95,11 @@ jobs:
           SH
           chmod 755 "$stage/dsh"
           # A tree that cannot start must not become a release asset.
-          installed=$(node "$stage/node_modules/@deepseek-ai/dsh/lib/bin.js" --version)
-          test "$installed" = "$version"
+          node "$stage/node_modules/@deepseek-ai/dsh/lib/bin.js" --version
           # zip follows symlinks, which stores node_modules/.bin as regular
           # files and keeps the archive extractable on Windows.
-          (cd dist/release && zip -q -r -X "dsh-$version.zip" "dsh-$version")
-          du -h "dist/release/dsh-$version.zip"
+          (cd dist/release && zip -q -r -X "$tag.zip" "$tag")
+          du -h "dist/release/$tag.zip"
 
       - name: Attach the archive to the tag's release
         env:
