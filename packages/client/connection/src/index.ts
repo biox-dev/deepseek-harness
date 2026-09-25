@@ -134,7 +134,9 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
   const connection = new HostConnectionService(
     ctx,
     trustedHosts,
-    await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays),
+    // Browser token login is hardcoded off: every request the Host/Origin fence
+    // accepts is admitted, and the printed URL carries no launch token.
+    await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays, true),
   )
   ctx.inject(['webServer'], (webCtx) => {
     assertImageBodyCapacity(webCtx, maxRequestBodyBytes)
