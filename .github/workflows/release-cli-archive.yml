@@ -1,0 +1,123 @@
+# Attach the downloadable `dsh` CLI archive to a `dsh-v*` tag's GitHub Release.
+#
+# `apps/cli/lib` is the launcher bundle only: it imports the harness packages,
+# the vendored framework, and third-party packages when a command runs, so a zip
+# of that directory cannot start on its own. The archive carries the installed
+# dependency closure instead, built from this run's packed tarballs the same way
+# `release:verify-packed-install` already proves it can be installed and driven.
+#
+# Dispatch this workflow from the `dsh-v*` tag; the version gate below rejects
+# any other ref.
+name: Release CLI archive (dsh)
+
+on:
+  push:
+    tags: ['dsh-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A re-run replaces the release asset it owns and never cancels an in-flight
+  # publication for the same tag.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  archive:
+    name: Assemble and attach the CLI archive
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      # Complete history: the release scripts read tags.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Configure pnpm store path
+        id: pnpm-store
+        run: |
+          store_root="$HOME/.local/share/pnpm/store"
+          echo "PNPM_CONFIG_STORE_DIR=$store_root" >> "$GITHUB_ENV"
+          store_path=$(PNPM_CONFIG_STORE_DIR="$store_root" pnpm store path --silent)
+          echo "path=$store_path" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-node-${{ env.PRIMARY_NODE_VERSION }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ env.PRIMARY_NODE_VERSION }}-pnpm-
+
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+
+      # This runs from the tag, so a mistyped tag fails here instead of
+      # attaching an archive whose version nothing else agrees with.
+      - name: Verify release version
+        env:
+          RELEASE_PUBLISH: 'true'
+        run: pnpm run release:verify --family dsh
+
+      - name: Build
+        run: pnpm run build:official
+
+      # The vendored framework is packed for the install below only; nothing
+      # here publishes it.
+      - name: Pack release tarballs
+        run: |
+          pnpm run release:pack --family dsh --out dist/npm --concurrency 8
+          pnpm run release:pack --family vendor --out dist/npm-vendor --concurrency 8
+
+      - name: Assemble the archive
+        run: |
+          set -euo pipefail
+          version=$(node -p "JSON.parse(require('node:fs').readFileSync('apps/cli/package.json','utf8')).version")
+          stage="dist/release/dsh-$version"
+          mkdir -p "$stage"
+          printf '{"name":"dsh-%s","version":"%s","private":true}\n' "$version" "$version" > "$stage/package.json"
+          # Optional dependencies stay out for the same reason the packed-install
+          # verification omits them: the Landlock platform packages behind them
+          # need one musl build per architecture.
+          npm install --prefix "$stage" --no-save --no-audit --no-fund --package-lock=false --omit=optional \
+            "$PWD"/dist/npm/*.tgz "$PWD"/dist/npm-vendor/*.tgz
+          rm -f "$stage/package-lock.json" "$stage/node_modules/.package-lock.json"
+          cat > "$stage/dsh" <<'SH'
+          #!/bin/sh
+          # Runs the bundled CLI with the Node.js on PATH.
+          here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          exec node "$here/node_modules/@deepseek-ai/dsh/lib/bin.js" "$@"
+          SH
+          chmod 755 "$stage/dsh"
+          # A tree that cannot start must not become a release asset.
+          installed=$(node "$stage/node_modules/@deepseek-ai/dsh/lib/bin.js" --version)
+          test "$installed" = "$version"
+          # zip follows symlinks, which stores node_modules/.bin as regular
+          # files and keeps the archive extractable on Windows.
+          (cd dist/release && zip -q -r -X "dsh-$version.zip" "dsh-$version")
+          du -h "dist/release/dsh-$version.zip"
+
+      - name: Attach the archive to the tag's release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --generate-notes
+          gh release upload "$tag" dist/release/*.zip --clobber
