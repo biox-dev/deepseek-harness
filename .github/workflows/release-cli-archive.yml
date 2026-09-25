@@ -81,10 +81,10 @@ jobs:
           stage="dist/release/$tag"
           mkdir -p "$stage"
           printf '{"name":"%s","version":"0.0.0","private":true}\n' "$tag" > "$stage/package.json"
-          # Optional dependencies stay out for the same reason the packed-install
-          # verification omits them: the Landlock platform packages behind them
-          # need one musl build per architecture.
-          npm install --prefix "$stage" --no-save --no-audit --no-fund --package-lock=false --omit=optional \
+          # Optional dependencies stay in: the CLI loads its native binding from
+          # node-addon-require-builtin-<platform> without it. The other-platform
+          # entries npm skips are excluded by their own os/cpu fields.
+          npm install --prefix "$stage" --no-save --no-audit --no-fund --package-lock=false \
             "$PWD"/dist/npm/*.tgz "$PWD"/dist/npm-vendor/*.tgz
           rm -f "$stage/package-lock.json" "$stage/node_modules/.package-lock.json"
           cat > "$stage/dsh" <<'SH'
@@ -95,6 +95,7 @@ jobs:
           SH
           chmod 755 "$stage/dsh"
           # A tree that cannot start must not become a release asset.
+          (cd "$stage" && node -e "require('node-addon-require-builtin')")
           node "$stage/node_modules/@deepseek-ai/dsh/lib/bin.js" --version
           # zip follows symlinks, which stores node_modules/.bin as regular
           # files and keeps the archive extractable on Windows.
