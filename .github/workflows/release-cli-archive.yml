@@ -5,9 +5,6 @@
 # of that directory cannot start on its own. The archive carries the installed
 # dependency closure instead, built from this run's packed tarballs the same way
 # `release:verify-packed-install` already proves it can be installed and driven.
-#
-# `release-docker-image.yml` chains off this workflow's completed runs, so its
-# `workflows:` entry depends on the `name:` below.
 name: Release CLI archive (dsh)
 
 on:

@@ -5,9 +5,9 @@ Runs the [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) Web
 
 ## Published images
 
-Pushing a `dsh-v*` tag publishes this image as `latest` to Docker Hub and to Aliyun ACR
-(`.github/workflows/release-docker-image.yml`) once `release-cli-archive.yml` has attached that
-release's CLI archive, which the image installs:
+Run the `Release Docker image (dsh)` workflow from the Actions tab with the released version, and it
+publishes this image as `latest` to Docker Hub and to Aliyun ACR
+(`.github/workflows/release-docker-image.yml`), installing that release's CLI archive:
 
 ```sh
 docker pull wybioinfo/dsh:latest
