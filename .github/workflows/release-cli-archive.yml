@@ -96,7 +96,14 @@ jobs:
           chmod 755 "$stage/dsh"
           # A tree that cannot start must not become a release asset.
           (cd "$stage" && node -e "require('node-addon-require-builtin')")
-          node "$stage/node_modules/@deepseek-ai/dsh/lib/bin.js" --version
+          # The bundle reports the version its manifests carry, which the tag
+          # asserts; a mismatch means the tag was created without the version
+          # bump and the release image would install a differently versioned CLI.
+          reported=$(node "$stage/node_modules/@deepseek-ai/dsh/lib/bin.js" --version)
+          if [[ "$reported" != "${tag#dsh-v}" ]]; then
+            echo "::error::the archive reports dsh $reported, but the tag is $tag; run 'pnpm release:dsh <version>' before tagging"
+            exit 1
+          fi
           # zip follows symlinks, which stores node_modules/.bin as regular
           # files and keeps the archive extractable on Windows.
           (cd dist/release && zip -q -r -X "$tag.zip" "$tag")
