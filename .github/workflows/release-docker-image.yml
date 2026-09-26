@@ -1,12 +1,18 @@
 # Build `docker/dockerfile` from a released `dsh` CLI bundle and publish it to
 # Docker Hub and Aliyun ACR under the `latest` tag.
 #
-# Started by hand with the version of an existing release, so the
-# `dsh-v<version>.zip` asset that `release-cli-archive.yml` attaches to that
-# release is already there when the image unpacks it.
+# The image installs the CLI from the `dsh-v<version>.zip` asset that
+# `release-cli-archive.yml` attaches to a release tag, so this workflow starts
+# from that workflow's completed run instead of racing it for the same tag push.
+# The `workflows:` entry below names it.
 name: Release Docker image (dsh)
 
 on:
+  workflow_run:
+    workflows: ['Release CLI archive (dsh)']
+    types: [completed]
+  # Re-publishing a specific release is the only reason to run this by hand; the
+  # version is the release tag without its `dsh-v` prefix.
   workflow_dispatch:
     inputs:
       version:
@@ -33,20 +39,38 @@ jobs:
   image:
     name: Build and publish the image
     runs-on: ubuntu-24.04
+    # A failed archive run attached no asset to install, and a manual dispatch is
+    # a deliberate act of its own.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     # Bounds the apt, Node.js, and image layers of the build.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:
+          # The triggering run's branch is the release tag. Only a manual
+          # re-publish builds the default branch.
+          ref: ${{ github.event_name == 'workflow_run' && format('refs/tags/{0}', github.event.workflow_run.head_branch) || github.ref }}
           persist-credentials: false
 
       - name: Resolve the released version
         id: release
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
+          TRIGGERED_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          TRIGGERED_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
         run: |
           set -euo pipefail
-          version="$REQUESTED_VERSION"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
+            # Every dsh release tag carries the archive this image installs, so
+            # any other triggering ref leaves no version to build.
+            if [[ "$TRIGGERED_REPOSITORY" != "$GITHUB_REPOSITORY" || "$TRIGGERED_BRANCH" != dsh-v* ]]; then
+              echo "::error::'$TRIGGERED_BRANCH' in $TRIGGERED_REPOSITORY is not a dsh release tag of $GITHUB_REPOSITORY"
+              exit 1
+            fi
+            version="${TRIGGERED_BRANCH#dsh-v}"
+          else
+            version="$REQUESTED_VERSION"
+          fi
           # The build arg becomes the download path of a release asset, so an
           # unsupported value must fail here rather than inside the image build.
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
@@ -54,20 +78,6 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      # The image installs that release's archive, so a version without one fails
-      # here in seconds instead of after the apt and Node.js layers.
-      - name: Verify the release carries the CLI archive
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.release.outputs.version }}
-        run: |
-          set -euo pipefail
-          tag="dsh-v$VERSION"
-          if ! gh release view "$tag" --json assets --jq '.assets[].name' | grep -qx "$tag.zip"; then
-            echo "::error::$tag.zip is not attached to the $tag release"
-            exit 1
-          fi
 
       - uses: docker/setup-buildx-action@v3
 
