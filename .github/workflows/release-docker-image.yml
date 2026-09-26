@@ -1,0 +1,125 @@
+# Build `docker/dockerfile` from a released `dsh` CLI bundle and publish it to
+# Docker Hub and Aliyun ACR under the `latest` tag.
+#
+# The image installs the CLI from the `dsh-v<version>.zip` asset that
+# `release-cli-archive.yml` attaches to a release tag, so this workflow starts
+# from that workflow's completed run instead of racing it for the same tag push.
+# The `workflows:` entry below names it.
+name: Release Docker image (dsh)
+
+on:
+  workflow_run:
+    workflows: ['Release CLI archive (dsh)']
+    types: [completed]
+  # Re-publishing a specific release is the only reason to run this by hand; the
+  # version is the release tag without its `dsh-v` prefix.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Released CLI version to build, e.g. 0.1.10
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # `latest` is one shared tag in two registries. A re-run replaces the tag it
+  # owns and never cancels a publication already in flight.
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  DOCKERHUB_REPO: wybioinfo/dsh
+  ACR_REGISTRY: registry.cn-hangzhou.aliyuncs.com
+  ACR_REPO: registry.cn-hangzhou.aliyuncs.com/wybioinfo/dsh
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  image:
+    name: Build and publish the image
+    runs-on: ubuntu-24.04
+    # A failed archive run attached no asset to install, and a manual dispatch is
+    # a deliberate act of its own.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    # Bounds the apt, Node.js, and image layers of the build.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The triggering run's branch is the release tag. Only a manual
+          # re-publish builds the default branch.
+          ref: ${{ github.event_name == 'workflow_run' && format('refs/tags/{0}', github.event.workflow_run.head_branch) || github.ref }}
+          persist-credentials: false
+
+      - name: Resolve the released version
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          TRIGGERED_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          TRIGGERED_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
+            # Every dsh release tag carries the archive this image installs, so
+            # any other triggering ref leaves no version to build.
+            if [[ "$TRIGGERED_REPOSITORY" != "$GITHUB_REPOSITORY" || "$TRIGGERED_BRANCH" != dsh-v* ]]; then
+              echo "::error::'$TRIGGERED_BRANCH' in $TRIGGERED_REPOSITORY is not a dsh release tag of $GITHUB_REPOSITORY"
+              exit 1
+            fi
+            version="${TRIGGERED_BRANCH#dsh-v}"
+          else
+            version="$REQUESTED_VERSION"
+          fi
+          # The build arg becomes the download path of a release asset, so an
+          # unsupported value must fail here rather than inside the image build.
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$version' is not a released dsh version such as 0.1.10 or 0.2.0-rc.1"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Log in to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
+      - name: Build the image
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: docker build --build-arg "DSH_VERSION=$VERSION" -t "dsh:$VERSION" docker
+
+      # `docker/dockerfile` unpacks the release archive without running it, so a
+      # mismatch between the tag and the bundled CLI is only visible here.
+      - name: Verify the bundled CLI reports the released version
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          reported=$(docker run --rm --entrypoint /usr/local/bin/dsh "dsh:$VERSION" --version)
+          if [[ "$reported" != "$VERSION" ]]; then
+            echo "::error::the image reports dsh $reported, expected $VERSION"
+            exit 1
+          fi
+
+      # Every build replaces `latest`; version-named tags would accumulate image
+      # copies neither registry's retention policy is set up to prune.
+      - name: Publish to Docker Hub and Aliyun ACR
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          for repo in "$DOCKERHUB_REPO" "$ACR_REPO"; do
+            docker tag "dsh:$VERSION" "$repo:latest"
+            docker push "$repo:latest"
+          done

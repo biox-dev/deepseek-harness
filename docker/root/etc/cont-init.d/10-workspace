@@ -1,0 +1,31 @@
+#!/usr/bin/with-contenv bash
+
+workspace="${DSH_WORKSPACE:-/workspace}"
+dsh_home="${DSH_HOME:-/config/.dsh}"
+port="${DSH_PORT:-3080}"
+
+# The base image ships abc with /bin/false as its shell.
+usermod -s /bin/bash abc
+
+mkdir -p "$workspace" "$dsh_home"
+chown -R "${PUID:-1000}:${PGID:-1000}" "$workspace" "$dsh_home"
+
+# `dsh web` deliberately binds loopback and rejects `--host 0.0.0.0` so a local
+# launch cannot expose remote code execution by accident. A container has to be
+# reachable through its published port, so the bind address is overridden with a
+# profile patch instead of a flag.
+#
+# A patch replaces the addressed row's *whole* config, which is why the shipped
+# gzip policy (level 1, 1024 byte threshold) is restated here rather than
+# inherited.
+mkdir -p /etc/dsh
+cat >/etc/dsh/webserver.patch.yml <<EOF
+- id: webserver
+  config:
+    host: 0.0.0.0
+    port: ${port}
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
+EOF
+chmod 0644 /etc/dsh/webserver.patch.yml

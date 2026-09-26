@@ -1,0 +1,20 @@
+#!/usr/bin/with-contenv bash
+
+export HOME=/config
+export SHELL=/bin/bash
+workspace="${DSH_WORKSPACE:-/workspace}"
+
+cd "$workspace"
+
+# Launcher flags come first and the booted `web` profile parses everything after
+# them, so `--no-open` and `--trusted-host` are appended last. The Web host would
+# otherwise try to hand the URL to a browser that does not exist in a container.
+app_args=(--no-open)
+for authority in ${DSH_TRUSTED_HOSTS:-}; do
+	app_args+=(--trusted-host "$authority")
+done
+
+exec s6-setuidgid abc dsh \
+	--profile web \
+	--patch /etc/dsh/webserver.patch.yml \
+	"${app_args[@]}"

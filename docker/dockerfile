@@ -1,0 +1,89 @@
+FROM lscr.io/linuxserver/baseimage-ubuntu:jammy
+
+# linuxserver.io s6 base image: user `abc` (renumbered to PUID/PGID at start),
+# /config is both the persistent volume and the home directory of `abc`.
+ENV PUID=1000
+ENV PGID=1000
+
+# Harness home (profiles, sessions, credentials, skills) — kept under /config so
+# it survives a container rebuild together with the rest of the user state.
+ENV DSH_HOME=/config/.dsh
+# Relocates the user's home, and therefore the directory `dsh` starts in. Left
+# empty on purpose: when unset the service falls back to /config, the persistent
+# volume. Set it to work in another directory, e.g. a bind-mounted project.
+ENV DSH_WORKSPACE=
+# Port the Web host binds inside the container.
+ENV DSH_PORT=3080
+# Space separated extra authorities the /api trust fence accepts, for deployments
+# reached through a name other than `localhost` or a LAN IP, e.g.
+#   -e DSH_TRUSTED_HOSTS="dsh.example.com dsh.internal:3080"
+ENV DSH_TRUSTED_HOSTS=
+ENV SHELL=/bin/bash
+
+SHELL ["/bin/bash", "-c"]
+
+# deepseek-harness pins Node.js `^22.19 || >=24` and pnpm 11; Ubuntu jammy ships
+# neither. Node 22 comes from NodeSource, pnpm is installed globally because
+# `dsh plugin` and the Web plugin manager shell out to it. git >= 2.26 is
+# required for the worktree hooks, and build-essential is kept so that plugin
+# installs can compile native addons.
+#
+# The CLI itself is not installed from npm: it comes from the `biox-dev`
+# prebuilt release archive, which is a self-contained bundle (a `dsh` launcher
+# plus a vendored `node_modules`), so it only needs to be unpacked onto PATH.
+ARG DSH_VERSION=0.1.10
+ARG DSH_REPO=biox-dev/deepseek-harness
+RUN apt-get update \
+	&& DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+		build-essential \
+		ca-certificates \
+		curl \
+		git \
+		gnupg \
+		jq \
+		python3 \
+		python3-pip \
+		python3-venv \
+		unzip \
+		vim \
+		xz-utils \
+	&& curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+	&& DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs \
+	&& npm install -g pnpm@11 \
+	&& curl -fsSL -o /tmp/dsh.zip \
+		"https://github.com/${DSH_REPO}/releases/download/dsh-v${DSH_VERSION}/dsh-v${DSH_VERSION}.zip" \
+	&& mkdir -p /opt/dsh \
+	&& unzip -q /tmp/dsh.zip -d /tmp/dsh-extract \
+	&& cp -a "/tmp/dsh-extract/dsh-v${DSH_VERSION}/." /opt/dsh/ \
+	&& chmod +x /opt/dsh/dsh \
+	&& printf '#!/bin/sh\nexec /opt/dsh/dsh "$@"\n' > /usr/local/bin/dsh \
+	&& chmod +x /usr/local/bin/dsh \
+	&& rm -rf /tmp/dsh.zip /tmp/dsh-extract \
+	&& npm cache clean --force \
+	&& chsh -s /bin/bash root \
+	&& usermod -s /bin/bash abc \
+	&& rm -rf /var/lib/apt/lists/*
+
+COPY root/ /
+RUN chmod +x /etc/cont-init.d/10-workspace /etc/services.d/dsh/run
+
+WORKDIR /config
+
+EXPOSE 3080
+
+# docker build -t dsh .
+#
+# docker run --rm -it \
+#   -p 3080:3080 \
+#   -e PUID=$(id -u) -e PGID=$(id -g) \
+#   -e DEEPSEEK_API_KEY=sk-your-key-here \
+#   -v dsh-config:/config \
+#   dsh
+#
+# HOME defaults to /config, the persistent volume, and `dsh` starts there. To use
+# another directory as home, set DSH_WORKSPACE alongside the matching mount:
+#
+#   -e DSH_WORKSPACE=/workspace -v "$PWD":/workspace \
+#
+# Then open http://localhost:3080/ — the URL line printed by the service carries
+# the one-time process token, so prefer the value from `docker logs <container>`.
