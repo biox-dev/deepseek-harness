@@ -34,6 +34,14 @@ fi
 # 写入 workspace 根、各包与各应用的清单并提交
 pnpm release:dsh "${VERSION}"
 
+# 清单必须已经带上本次版本，否则 tag 指向的提交里 CLI 仍报告旧版本，
+# archive 工作流的版本校验会失败。
+MANIFEST_VERSION=$(node -p "require('./package.json').version")
+if [[ "${MANIFEST_VERSION}" != "${VERSION}" ]]; then
+  echo "清单版本为 ${MANIFEST_VERSION}，不是 ${VERSION}，未打 tag"
+  exit 1
+fi
+
 # 创建附注标签并推送
 git tag -a "${NEW_TAG}" -m "Release ${NEW_TAG}"
 git push origin HEAD "${NEW_TAG}"
